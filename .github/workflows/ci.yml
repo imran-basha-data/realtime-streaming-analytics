@@ -93,3 +93,38 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           tar -xzf gitleaks.tgz gitleaks
           ./gitleaks git . --redact --verbose --exit-code 1
+
+  stack:
+    name: Container stack smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: promtool check config and rules
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/p" -w /p --entrypoint promtool \
+            prom/prometheus:v3.5.0 check config prometheus.yml
+      - name: promtool unit-test alerting and recording rules
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/p" -w /p --entrypoint promtool \
+            prom/prometheus:v3.5.0 test rules alerts.test.yml
+      - name: Validate Grafana dashboard
+        run: |
+          python3 - <<'PY'
+          import json
+          d = json.load(open("monitoring/grafana/dashboards/stream-analytics.json"))
+          ids = [p["id"] for p in d["panels"]]
+          assert len(ids) == len(set(ids)), "duplicate panel ids"
+          assert all(t["expr"] for p in d["panels"] for t in p["targets"]), "empty query"
+          print(f"{len(ids)} panels OK")
+          PY
+      - name: Build image
+        run: docker build -t realtime-streaming-analytics:local .
+      - name: Trivy image scan (fixable HIGH/CRITICAL fail the build)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.67.2 image --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --no-progress --exit-code 1 realtime-streaming-analytics:local
+      - name: End-to-end smoke test (Kafka, PostgreSQL, consumer, API, Prometheus)
+        run: |
+          cp .env.example .env
+          scripts/smoke_test.sh 3000

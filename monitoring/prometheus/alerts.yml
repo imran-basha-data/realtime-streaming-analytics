@@ -1,0 +1,74 @@
+groups:
+  - name: stream-recording
+    rules:
+      - record: stream:consumer_lag:sum
+        expr: sum(stream_consumer_lag_messages)
+      # Share of consumed messages that went to the DLQ (0 when idle, not "no data").
+      - record: stream:dead_letter_ratio:rate5m
+        expr: |
+          (
+            sum(rate(stream_dead_letters_total[5m]))
+            /
+            (sum(rate(stream_events_total[5m])) + sum(rate(stream_dead_letters_total[5m])) > 0)
+          ) or vector(0)
+      - record: stream:event_latency_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(stream_event_latency_seconds_bucket[5m])))
+
+  - name: stream-alerts
+    rules:
+      - alert: StreamConsumerDown
+        expr: up{job="stream-consumer"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Stream consumer is not being scraped
+          description: "Prometheus cannot scrape {{ $labels.instance }}; events are not being processed."
+
+      - alert: StreamConsumerStalled
+        expr: stream:consumer_lag:sum > 0 and on() increase(stream_batches_total[10m]) == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: Consumer has lag but is not committing batches
+          description: "{{ $value }} messages waiting and no batch committed in 10 minutes."
+
+      - alert: StreamConsumerLagHigh
+        expr: stream:consumer_lag:sum > 10000
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Consumer lag above 10k messages
+          description: "Lag is {{ $value }} messages."
+
+      - alert: StreamDeadLetterRatioHigh
+        expr: stream:dead_letter_ratio:rate5m > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: More than 5% of messages are dead-lettered
+          description: "Dead-letter ratio is {{ $value | humanizePercentage }}; check producers and the DLQ topic."
+
+      - alert: StreamEventLatencyHigh
+        expr: stream:event_latency_seconds:p95_5m > 30
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: p95 event-to-database latency above 30s
+          description: "p95 latency is {{ $value | humanizeDuration }}."
+
+      - alert: StreamDatabaseRetries
+        expr: increase(stream_db_retries_total[10m]) > 5
+        labels: {severity: warning}
+        annotations:
+          summary: Consumer is retrying database transactions
+          description: "{{ $value }} retries in 10 minutes."
+
+      - alert: AnalyticsApiErrors
+        expr: |
+          sum(rate(api_requests_total{status=~"5.."}[5m]))
+          / (sum(rate(api_requests_total[5m])) > 0) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Analytics API 5xx ratio above 5%
+          description: "5xx ratio is {{ $value | humanizePercentage }}."
