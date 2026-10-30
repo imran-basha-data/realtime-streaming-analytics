@@ -7,8 +7,12 @@ import json
 import sys
 from collections.abc import Sequence
 
+from prometheus_client import start_http_server
+
 from streaming import __version__
 from streaming.config import Settings
+from streaming.consumer import StreamConsumer
+from streaming.db import apply_schema
 from streaming.generator import EventGenerator, GeneratorConfig
 from streaming.logging_config import configure_logging
 from streaming.producer import EventProducer, run_producer
@@ -28,6 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
     produce.add_argument("--seed", type=int, default=None)
     produce.add_argument("--duplicate-rate", type=float, default=0.0)
     produce.add_argument("--malformed-rate", type=float, default=0.0)
+
+    sub.add_parser("migrate", help="Create or update the PostgreSQL schema.")
+
+    consume = sub.add_parser("consume", help="Consume events into PostgreSQL.")
+    consume.add_argument("--max-batches", type=int, default=None)
+    consume.add_argument(
+        "--idle-timeout", type=float, default=None, help="Exit after this many idle seconds."
+    )
+    consume.add_argument("--no-metrics", action="store_true", help="Do not serve /metrics.")
     return parser
 
 
@@ -57,6 +70,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(stats.as_dict()))
         return 0 if stats.failed == 0 else 1
+
+    if args.command == "migrate":
+        apply_schema(settings.database_url)
+        print(json.dumps({"schema": "applied"}))
+        return 0
+
+    if args.command == "consume":
+        apply_schema(settings.database_url)
+        consumer = StreamConsumer(settings)
+        if not args.no_metrics:
+            start_http_server(settings.metrics_port, registry=consumer.metrics.registry)
+        consumer.install_signal_handlers()
+        run_stats = consumer.run(max_batches=args.max_batches, idle_timeout_s=args.idle_timeout)
+        print(json.dumps(run_stats.__dict__))
+        return 0
 
     return 1  # pragma: no cover
 
