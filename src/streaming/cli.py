@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--idle-timeout", type=float, default=None, help="Exit after this many idle seconds."
     )
     consume.add_argument("--no-metrics", action="store_true", help="Do not serve /metrics.")
+
+    sub.add_parser("api", help="Serve the analytics API.")
     return parser
 
 
@@ -84,6 +86,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         consumer.install_signal_handlers()
         run_stats = consumer.run(max_batches=args.max_batches, idle_timeout_s=args.idle_timeout)
         print(json.dumps(run_stats.__dict__))
+        return 0
+
+    if args.command == "api":
+        import uvicorn
+
+        from streaming.api import create_app
+
+        uvicorn.run(
+            create_app(settings),
+            host=settings.api_host,
+            port=settings.api_port,
+            log_config=None,  # keep the JSON logging configured above
+            access_log=False,  # request metrics are exported on /metrics instead
+        )
         return 0
 
     return 1  # pragma: no cover
