@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt && pip install --no-deps -e .
+      - run: ruff check src tests && ruff format --check src tests
+      - run: mypy
+
+  test:
+    name: Tests (Kafka 4.1 + PostgreSQL 16)
+    runs-on: ubuntu-latest
+    services:
+      kafka:
+        image: apache/kafka:4.1.0
+        ports: ["9092:9092"]
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s --health-timeout 10s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rsa
+          POSTGRES_PASSWORD: rsa_ci_only
+          POSTGRES_DB: rsa_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rsa -d rsa_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      STREAM_TEST_BOOTSTRAP_SERVERS: localhost:9092
+      STREAM_TEST_DATABASE_URL: postgresql://rsa:rsa_ci_only@localhost:5432/rsa_test
+      # Missing services fail the build instead of skipping tests.
+      STREAM_REQUIRE_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt && pip install --no-deps -e .
+      - name: Unit and integration tests
+        run: pytest --cov --cov-report=term --junitxml=junit.xml
+      - name: Fail if any test was skipped
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          s = ET.parse("junit.xml").getroot().find("testsuite")
+          print(f"tests={s.get('tests')} failures={s.get('failures')} errors={s.get('errors')} skipped={s.get('skipped')}")
+          raise SystemExit(1 if int(s.get("skipped", 0)) else 0)
+          PY
+
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install bandit==1.9.4 pip-audit==2.10.1
+      - run: bandit -r src
+      - run: pip-audit -r requirements.txt --strict
+      - name: Gitleaks (full history)
+        env:
+          GITLEAKS_VERSION: 8.24.3
+        run: |
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks git . --redact --verbose --exit-code 1
