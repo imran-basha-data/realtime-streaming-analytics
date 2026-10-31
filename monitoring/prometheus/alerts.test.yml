@@ -1,0 +1,97 @@
+# promtool test rules alerts.test.yml
+rule_files: [alerts.yml]
+evaluation_interval: 1m
+
+tests:
+  - name: consumer down fires after 2 minutes
+    interval: 1m
+    input_series:
+      - series: 'up{job="stream-consumer", instance="consumer:9108"}'
+        values: "0x5"
+    alert_rule_test:
+      - {eval_time: 1m, alertname: StreamConsumerDown, exp_alerts: []}
+      - eval_time: 3m
+        alertname: StreamConsumerDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: stream-consumer, instance: "consumer:9108"}
+            exp_annotations:
+              summary: Stream consumer is not being scraped
+              description: "Prometheus cannot scrape consumer:9108; events are not being processed."
+
+  - name: consumer stops committing while lag remains
+    interval: 1m
+    input_series:
+      - series: 'stream_consumer_lag_messages{partition="0"}'
+        values: "500x45"
+      # Commits a batch every minute until 15m, then stops.
+      - series: stream_batches_total
+        values: "0+10x15 150x30"
+    alert_rule_test:
+      - {eval_time: 24m, alertname: StreamConsumerStalled, exp_alerts: []}
+      - {eval_time: 28m, alertname: StreamConsumerStalled, exp_alerts: []}
+      - eval_time: 31m
+        alertname: StreamConsumerStalled
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: Consumer has lag but is not committing batches
+              description: "500 messages waiting and no batch committed in 10 minutes."
+
+  - name: progressing consumer with lag does not alert
+    interval: 1m
+    input_series:
+      - series: 'stream_consumer_lag_messages{partition="0"}'
+        values: "500x30"
+      - series: stream_batches_total
+        values: "0+10x30"
+    alert_rule_test:
+      - {eval_time: 25m, alertname: StreamConsumerStalled, exp_alerts: []}
+
+  - name: dead letter ratio
+    interval: 1m
+    input_series:
+      - series: 'stream_events_total{event_type="production.completed", outcome="processed"}'
+        values: "0+900x30"
+      - series: 'stream_dead_letters_total{reason="invalid_json"}'
+        values: "0+100x30"
+    promql_expr_test:
+      - expr: round(stream:dead_letter_ratio:rate5m, 0.001)
+        eval_time: 10m
+        exp_samples:
+          - value: 0.1
+    alert_rule_test:
+      - {eval_time: 10m, alertname: StreamDeadLetterRatioHigh, exp_alerts: []}
+      - eval_time: 20m
+        alertname: StreamDeadLetterRatioHigh
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: More than 5% of messages are dead-lettered
+              description: "Dead-letter ratio is 10%; check producers and the DLQ topic."
+
+  - name: idle pipeline has a zero dead letter ratio, not missing data
+    interval: 1m
+    input_series:
+      - series: 'stream_events_total{event_type="production.completed", outcome="processed"}'
+        values: "100x10"
+    promql_expr_test:
+      - expr: round(stream:dead_letter_ratio:rate5m, 0.001)
+        eval_time: 8m
+        exp_samples:
+          - value: 0
+
+  - name: api error ratio
+    interval: 1m
+    input_series:
+      - series: 'api_requests_total{route="/api/v1/production/summary", method="GET", status="200"}'
+        values: "0+80x30"
+      - series: 'api_requests_total{route="/api/v1/production/summary", method="GET", status="503"}'
+        values: "0+20x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AnalyticsApiErrors
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Analytics API 5xx ratio above 5%
+              description: "5xx ratio is 20%."

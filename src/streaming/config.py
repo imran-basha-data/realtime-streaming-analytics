@@ -28,6 +28,11 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql://rsa:rsa_local_dev@localhost:5432/rsa"
     metrics_port: int = Field(default=9108, ge=1024, le=65_535)
+
+    # Analytics API. Loopback by default; containers set STREAM_API_HOST=0.0.0.0.
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(default=8000, ge=1024, le=65_535)
+    api_pool_size: int = Field(default=10, ge=1, le=100)
     log_level: str = "INFO"
     log_format: str = "json"
 
